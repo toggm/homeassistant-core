@@ -9,6 +9,8 @@ from datetime import datetime, timedelta
 import struct
 from typing import Any, cast
 
+from pymodbus.pdu import ModbusPDU
+
 from homeassistant.const import (
     CONF_ADDRESS,
     CONF_COMMAND_OFF,
@@ -16,6 +18,7 @@ from homeassistant.const import (
     CONF_COUNT,
     CONF_DELAY,
     CONF_DEVICE_CLASS,
+    CONF_ID,
     CONF_NAME,
     CONF_OFFSET,
     CONF_SCAN_INTERVAL,
@@ -51,6 +54,7 @@ from .const import (
     CONF_NAN_VALUE,
     CONF_PRECISION,
     CONF_SCALE,
+    CONF_SCAN_GROUP,
     CONF_SLAVE_COUNT,
     CONF_STATE_OFF,
     CONF_STATE_ON,
@@ -86,6 +90,7 @@ class ModbusBaseEntity(Entity):
             self._device_address = conf_slave
         else:
             self._device_address = entry.get(CONF_DEVICE_ADDRESS, 1)
+        self._id = entry[CONF_ID]
         self._address = int(entry[CONF_ADDRESS])
         self._input_type = entry[CONF_INPUT_TYPE]
         self._scan_interval = int(entry[CONF_SCAN_INTERVAL])
@@ -98,6 +103,37 @@ class ModbusBaseEntity(Entity):
         self._max_value = entry.get(CONF_MAX_VALUE)
         self._nan_value = entry.get(CONF_NAN_VALUE)
         self._zero_suppress = entry.get(CONF_ZERO_SUPPRESS)
+        self._scan_group = entry.get(CONF_SCAN_GROUP)
+        self._unique_id = (
+            f"modbus_{hub.name}_{self._device_address}_{self._input_type}_{self._address}"
+        )
+
+    def init_update_listeners(self) -> None:
+        """Initialize update listeners."""
+        if (
+            self._device_address is not None
+            and self._input_type
+            and self._address is not None
+            and self._scan_group is not None
+        ):
+            self._hub.register_update_listener(
+                self._scan_group,
+                self._device_address,
+                self._input_type,
+                self._address,
+                self._address,
+                self.async_update_from_result,
+            )
+
+    @abstractmethod
+    async def async_update_from_result(
+        self,
+        raw_result: ModbusPDU | None,
+        slave_id: int,
+        input_type: str,
+        address: int,
+    ) -> None:
+        """Virtual function to be overwritten."""
 
     @abstractmethod
     async def _async_update(self) -> None:
@@ -114,8 +150,9 @@ class ModbusBaseEntity(Entity):
         if cancel_pending_update and self._cancel_call:
             self._cancel_call()
         await self._async_update()
+
         self.async_write_ha_state()
-        if self._scan_interval > 0:
+        if self._scan_interval > 0 and self._scan_group is None:
             self._cancel_call = async_call_later(
                 self.hass,
                 timedelta(seconds=self._scan_interval),
@@ -138,7 +175,13 @@ class ModbusBaseEntity(Entity):
     async def async_await_connection(self, _now: Any) -> None:
         """Wait for first connect."""
         await self._hub.event_connected.wait()
+        self.init_update_listeners()
         await self.async_local_update(cancel_pending_update=True)
+
+    @property
+    def unique_id(self) -> str | None:
+        """Return a unique ID."""
+        return self._unique_id
 
     async def async_base_added_to_hass(self) -> None:
         """Handle entity which will be added."""
@@ -226,12 +269,20 @@ class ModbusStructEntity(ModbusBaseEntity, RestoreEntity):
             return str(round(val))
         return f"{float(val):.{self._precision}f}"
 
-    def unpack_structure_result(self, registers: list[int]) -> str | None:
+    def update_value(self, new_value: Any) -> None:
+        """Update value and write state if value changed."""
+        self._attr_available = True
+        if new_value != self._value:
+            self._value = new_value
+            self.async_write_ha_state()
+
+    def unpack_structure_result(self, registers: list[int], address: int) -> str | None:
         """Convert registers to proper result."""
 
         if self._swap:
             registers = self._swap_registers(
-                copy.deepcopy(registers), self._slave_count
+                copy.deepcopy(registers[address : address + self._count]),
+                self._slave_count,
             )
         byte_string = b"".join([x.to_bytes(2, byteorder="big") for x in registers])
         if self._data_type == DataType.STRING:
@@ -310,6 +361,26 @@ class ModbusToggleEntity(ModbusBaseEntity, ToggleEntity, RestoreEntity):
         else:
             self._verify_active = False
 
+    def init_update_listeners(self) -> None:
+        """Initialize update listeners."""
+        if (
+            self._verify_active is True
+            and self._device_address is not None
+            and self._verify_type
+            and self._verify_address is not None
+            and self._scan_group is not None
+        ):
+            self._hub.register_update_listener(
+                self._scan_group,
+                self._device_address,
+                self._verify_type,
+                self._verify_address,
+                self._verify_address,
+                self.async_update_from_result,
+            )
+        else:
+            super().init_update_listeners()
+
     async def async_added_to_hass(self) -> None:
         """Handle entity which will be added."""
         await self.async_base_added_to_hass()
@@ -325,6 +396,7 @@ class ModbusToggleEntity(ModbusBaseEntity, ToggleEntity, RestoreEntity):
         result = await self._hub.async_pb_call(
             self._device_address, self._address, command, self._write_type
         )
+
         if result is None:
             self._attr_available = False
             self.async_write_ha_state()
@@ -360,16 +432,41 @@ class ModbusToggleEntity(ModbusBaseEntity, ToggleEntity, RestoreEntity):
         result = await self._hub.async_pb_call(
             self._device_address, self._verify_address, 1, self._verify_type
         )
-        if result is None:
+        await self.async_update_from_result(result, self._device_address, self._verify_type, 0)
+
+    async def async_update_from_result(
+        self,
+        raw_result: ModbusPDU | None,
+        slave_id: int,
+        input_type: str,
+        address: int,
+    ) -> None:
+        """Update the entity state."""
+        if raw_result is None:
             self._attr_available = False
             return
 
         self._attr_available = True
         if self._verify_type in (CALL_TYPE_COIL, CALL_TYPE_DISCRETE):
-            self._attr_is_on = bool(result.bits[0] & 1)
-        else:
-            value = int(result.registers[0])
-            if value in self._state_on:
+            if len(raw_result.bits) > address:
+                _LOGGER.debug(
+                    "update switch slave=%s, input_type=%s, address=%s -> result=%s",
+                    slave_id,
+                    input_type,
+                    address,
+                    raw_result.bits[address],
+                )
+                self._attr_is_on = bool(raw_result.bits[address] & 1)
+        elif len(raw_result.registers) > address:
+            _LOGGER.debug(
+                "update switch slave=%s, input_type=%s, address=%s -> result=%s",
+                slave_id,
+                input_type,
+                address,
+                raw_result.registers,
+            )
+            value = int(raw_result.registers[address])
+            if value == self._state_on:
                 self._attr_is_on = True
             elif value in self._state_off:
                 self._attr_is_on = False
@@ -383,3 +480,4 @@ class ModbusToggleEntity(ModbusBaseEntity, ToggleEntity, RestoreEntity):
                     self._verify_address,
                     value,
                 )
+                self._attr_is_on = bool(raw_result.bits[address] & 1)

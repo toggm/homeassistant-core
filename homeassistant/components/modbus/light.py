@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
+
+from pymodbus.pdu import ModbusPDU
 
 from homeassistant.components.light import (
     ATTR_BRIGHTNESS,
     ATTR_COLOR_TEMP_KELVIN,
+    ENTITY_ID_FORMAT,
     ColorMode,
     LightEntity,
 )
@@ -17,6 +21,8 @@ from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType
 
 from . import get_hub
 from .const import (
+    CALL_TYPE_COIL,
+    CALL_TYPE_DISCRETE,
     CALL_TYPE_REGISTER_HOLDING,
     CALL_TYPE_WRITE_REGISTER,
     CONF_BRIGHTNESS_REGISTER,
@@ -34,6 +40,7 @@ from .entity import ModbusToggleEntity
 from .modbus import ModbusHub
 
 PARALLEL_UPDATES = 1
+_LOGGER = logging.getLogger(__name__)
 
 
 async def async_setup_platform(
@@ -73,6 +80,8 @@ class ModbusLight(ModbusToggleEntity, LightEntity):
             self._attr_max_color_temp_kelvin = config.get(
                 CONF_MAX_TEMP, LIGHT_DEFAULT_MAX_KELVIN
             )
+        self.entity_id = ENTITY_ID_FORMAT.format(self._id)
+        self._result = 0
 
     async def async_added_to_hass(self) -> None:
         """Handle entity which will be added."""
@@ -220,3 +229,35 @@ class ModbusLight(ModbusToggleEntity, LightEntity):
             * (LIGHT_MODBUS_SCALE_MAX - LIGHT_MODBUS_SCALE_MIN)
             / (self._attr_max_color_temp_kelvin - self._attr_min_color_temp_kelvin)
         )
+
+    async def async_update_from_result(
+        self,
+        raw_result: ModbusPDU | None,
+        slave_id: int,
+        input_type: str,
+        address: int,
+    ) -> None:
+        """Update the state of the light."""
+        if raw_result is None:
+            self._attr_available = False
+            self._result = 0
+            self.async_write_ha_state()
+        else:
+            self._attr_available = True
+            if input_type in (CALL_TYPE_COIL, CALL_TYPE_DISCRETE):
+                self._result = raw_result.bits[address]
+            else:
+                self._result = raw_result.registers[address]
+            new_value = bool(self._result & 1)
+
+            if new_value != self._attr_is_on:
+                _LOGGER.debug(
+                    "change light state: input_type=%s, address=%s, new_value=%s, _attr_is_on=%s",
+                    input_type,
+                    address,
+                    new_value,
+                    self._attr_is_on,
+                )
+
+                self._attr_is_on = new_value
+                self.async_write_ha_state()
