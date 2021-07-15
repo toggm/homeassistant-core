@@ -31,3 +31,17 @@ of a component, check the `Home Assistant help section <https://home-assistant.i
 .. |ohf-logo| image:: https://www.openhomefoundation.org/badges/home-assistant.png
    :alt: Home Assistant - A project from the Open Home Foundation
    :target: https://www.openhomefoundation.org/
+
+
+Build docker image
+------------------
+
+AMD64:
+```
+docker buildx build --platform linux/amd64 -t <REMOTE_TAG> --build-arg BUILD_FROM=ghcr.io/home-assistant/amd64-homeassistant-base:<BASE_VERSION> --build-arg BUILD_ARCH=amd64 . --push
+```
+
+ARM:
+```
+ docker buildx build --platform linux/arm64 -t <REMOTE_TAG> --build-arg BUILD_FROM=ghcr.io/home-assistant/aarch64-homeassistant-base:<BASE_VERSION> --build-arg BUILD_ARCH=aarch64 --build-arg=SSOCR_VERSION=2.22.1 . --push                       
+```

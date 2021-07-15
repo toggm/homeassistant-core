@@ -5,7 +5,9 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from homeassistant.components.binary_sensor import BinarySensorEntity
+from pymodbus.pdu import ModbusPDU
+
+from homeassistant.components.binary_sensor import ENTITY_ID_FORMAT, BinarySensorEntity
 from homeassistant.const import (
     CONF_BINARY_SENSORS,
     CONF_DEVICE_CLASS,
@@ -74,8 +76,9 @@ class ModbusBinarySensor(BasePlatform, RestoreEntity, BinarySensorEntity):
         """Initialize the Modbus binary sensor."""
         self._count = slave_count + 1
         self._coordinator: DataUpdateCoordinator[list[int] | None] | None = None
-        self._result: list[int] = []
+        self._result: int = 0
         super().__init__(hass, hub, entry)
+        self.entity_id = ENTITY_ID_FORMAT.format(self._id)
 
     async def async_setup_slaves(
         self, hass: HomeAssistant, slave_count: int, entry: dict[str, Any]
@@ -106,23 +109,37 @@ class ModbusBinarySensor(BasePlatform, RestoreEntity, BinarySensorEntity):
     async def _async_update(self) -> None:
         """Update the state of the sensor."""
 
-        # do not allow multiple active calls to the same platform
         result = await self._hub.async_pb_call(
             self._slave, self._address, self._count, self._input_type
         )
-        if result is None:
+        await self.async_update_from_result(result, self._slave, self._input_type, 0)
+
+    async def async_update_from_result(
+        self,
+        raw_result: ModbusPDU | None,
+        slave_id: int,
+        input_type: str,
+        address: int,
+    ) -> None:
+        """Update the state of the sensor."""
+        if raw_result is None:
             self._attr_available = False
-            self._result = []
+            self._result = 0
+            self.async_write_ha_state()
         else:
             self._attr_available = True
-            if self._input_type in (CALL_TYPE_COIL, CALL_TYPE_DISCRETE):
-                self._result = [int(bit) for bit in result.bits]
+            if input_type in (CALL_TYPE_COIL, CALL_TYPE_DISCRETE):
+                self._result = raw_result.bits[address]
             else:
-                self._result = result.registers
-            self._attr_is_on = bool(self._result[0] & 1)
+                self._result = raw_result.registers[address]
+            new_value = bool(self._result & 1)
+
+            if new_value != self._attr_is_on:
+                self._attr_is_on = new_value
+                self.async_write_ha_state()
 
         if self._coordinator:
-            self._coordinator.async_set_updated_data(self._result)
+            self._coordinator.async_set_updated_data([self._result])
 
 
 class SlaveSensor(
