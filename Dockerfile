@@ -35,6 +35,17 @@ RUN pip3 install uv==0.8.9
 
 WORKDIR /usr/src
 
+# Need to install not-yet merged enocean module manually
+RUN \
+    --mount=type=cache,target=/etc/apk/cache,sharing=locked,id=apk-cache-${BUILD_FROM} \
+    apk add \
+        git
+        
+RUN \
+    git clone -b dev/esp2_support https://github.com/toggm/enocean.git enocean  \
+    && cd enocean \
+    && pip3 install .
+
 ## Setup Home Assistant Core dependencies
 COPY requirements.txt homeassistant/
 COPY homeassistant/package_constraints.txt homeassistant/homeassistant/
